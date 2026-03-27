@@ -1,0 +1,290 @@
+openapi: 3.0.3
+info:
+  title: Blockchain Node API - Grados Académicos
+  description: |
+    API REST para nodo de red blockchain distribuida.
+    Gestiona grados académicos como bloques en una cadena inmutable.
+    
+    **Nodo:** Express.js  
+    **PoW:** SHA256 con prefijo de ceros (dificultad configurable)
+  version: 1.0.0
+  contact:
+    name: Nodo Express
+
+servers:
+  - url: http://localhost:8003
+    description: Nodo local (Express)
+
+tags:
+  - name: chain
+    description: Operaciones sobre la cadena de bloques
+  - name: transactions
+    description: Gestión de transacciones pendientes
+  - name: nodes
+    description: Registro y consenso entre nodos
+  - name: status
+    description: Estado del nodo
+
+paths:
+  /status:
+    get:
+      tags: [status]
+      summary: Estado del nodo
+      responses:
+        '200':
+          description: Info del nodo
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  node_id: { type: string }
+                  port: { type: integer }
+                  difficulty: { type: integer }
+                  chain_length: { type: integer }
+                  pending_transactions: { type: integer }
+                  known_nodes: { type: integer }
+
+  /chain:
+    get:
+      tags: [chain]
+      summary: Obtiene la cadena completa de bloques
+      responses:
+        '200':
+          description: Cadena de bloques ordenada
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  node_id: { type: string }
+                  length: { type: integer }
+                  chain:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Bloque'
+
+  /chain/validate:
+    get:
+      tags: [chain]
+      summary: Valida la integridad de la cadena local
+      responses:
+        '200':
+          description: Resultado de la validación
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  valida: { type: boolean }
+                  length: { type: integer }
+                  error:
+                    type: string
+                    nullable: true
+
+  /mine:
+    post:
+      tags: [chain]
+      summary: Mina un nuevo bloque con las transacciones pendientes
+      responses:
+        '201':
+          description: Bloque minado exitosamente
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message: { type: string }
+                  block:
+                    $ref: '#/components/schemas/Bloque'
+                  pow_ms:
+                    type: integer
+                    description: Milisegundos que tomó el PoW
+        '400':
+          description: Sin transacciones pendientes
+
+  /transactions:
+    get:
+      tags: [transactions]
+      summary: Lista las transacciones pendientes
+      responses:
+        '200':
+          description: Transacciones en memoria
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  pending:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Transaccion'
+                  count: { type: integer }
+    post:
+      tags: [transactions]
+      summary: Añade una nueva transacción y la propaga a la red
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Transaccion'
+            example:
+              persona_id: "uuid-persona"
+              institucion_id: "uuid-institucion"
+              programa_id: "uuid-programa"
+              titulo_obtenido: "Ingeniero en Sistemas Computacionales"
+              fecha_inicio: "2018-08-01"
+              fecha_fin: "2023-05-30"
+              numero_cedula: "12345678"
+      responses:
+        '201':
+          description: Transacción aceptada
+        '400':
+          description: Campos requeridos faltantes
+
+  /nodes/register:
+    post:
+      tags: [nodes]
+      summary: Registra uno o varios nodos en la red
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [nodes]
+              properties:
+                nodes:
+                  type: array
+                  items:
+                    type: string
+                  example: ["http://localhost:8001", "http://localhost:8002"]
+      responses:
+        '201':
+          description: Nodos registrados exitosamente
+
+  /nodes:
+    get:
+      tags: [nodes]
+      summary: Lista los nodos conocidos
+      responses:
+        '200':
+          description: Lista de nodos registrados
+
+  /nodes/resolve:
+    get:
+      tags: [nodes]
+      summary: Resuelve conflictos adoptando la cadena válida más larga
+      responses:
+        '200':
+          description: Resultado del consenso
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message: { type: string }
+                  replaced: { type: boolean }
+                  chain_length: { type: integer }
+
+  /blocks/receive:
+    post:
+      tags: [chain]
+      summary: Recibe un bloque propagado por otro nodo
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Bloque'
+      responses:
+        '201':
+          description: Bloque aceptado
+        '400':
+          description: Bloque inválido o PoW no cumplido
+
+components:
+  schemas:
+    Bloque:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        persona_id:
+          type: string
+          format: uuid
+        institucion_id:
+          type: string
+          format: uuid
+        programa_id:
+          type: string
+          format: uuid
+          nullable: true
+        fecha_inicio:
+          type: string
+          format: date
+          nullable: true
+        fecha_fin:
+          type: string
+          format: date
+        titulo_obtenido:
+          type: string
+        numero_cedula:
+          type: string
+          nullable: true
+        titulo_tesis:
+          type: string
+          nullable: true
+        menciones:
+          type: string
+          nullable: true
+        hash_actual:
+          type: string
+          description: SHA256 del bloque
+        hash_anterior:
+          type: string
+          nullable: true
+          description: "null en bloque génesis"
+        nonce:
+          type: integer
+        firmado_por:
+          type: string
+          description: NODE_ID del nodo que minó el bloque
+        creado_en:
+          type: string
+          format: date-time
+
+    Transaccion:
+      type: object
+      required: [persona_id, institucion_id, titulo_obtenido, fecha_fin]
+      properties:
+        persona_id:
+          type: string
+          format: uuid
+        institucion_id:
+          type: string
+          format: uuid
+        programa_id:
+          type: string
+          format: uuid
+          nullable: true
+        titulo_obtenido:
+          type: string
+        fecha_inicio:
+          type: string
+          format: date
+          nullable: true
+        fecha_fin:
+          type: string
+          format: date
+        numero_cedula:
+          type: string
+          nullable: true
+        titulo_tesis:
+          type: string
+          nullable: true
+        menciones:
+          type: string
+          nullable: true
