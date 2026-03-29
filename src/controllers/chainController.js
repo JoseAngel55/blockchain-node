@@ -3,93 +3,72 @@ const router  = express.Router();
 const bc      = require('../services/blockchain');
 const { propagarBloque } = require('../services/propagacion');
 
-// ─── GET /chain ───────────────────────────────
+// GET /chain
 router.get('/', async (req, res) => {
   try {
     const chain = await bc.obtenerCadena();
-    res.json({
-      node_id: process.env.NODE_ID,
-      length:  chain.length,
-      chain,
-      cadena:  chain, // alias para compatibilidad con Next.js
-    });
+    res.json({ node_id: process.env.NODE_ID, length: chain.length, chain, cadena: chain });
   } catch (e) {
     console.error('[CHAIN]', e);
     res.status(500).json({ error: e.message });
   }
 });
 
-// ─── GET /chain/validate ──────────────────────
+// GET /chain/validate
 router.get('/validate', async (req, res) => {
   try {
-    const chain    = await bc.obtenerCadena();
+    const chain = await bc.obtenerCadena();
     const resultado = bc.validarCadena(chain);
     res.json({ ...resultado, length: chain.length });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
- 
-// ─────────────────────────────────────────────────────────────────────────────
-//  Adaptador de formato
-//
-//  El nodo del compañero (también Express) usa un esquema diferente:
-//    {
-//      index, timestamp, nonce,
-//      hashActual:   "000...",   ← camelCase
-//      hashAnterior: "000...",   ← camelCase
-//      data: {
-//        transacciones: [{ id, personaId, institucionId, ... }],
-//        minadoPor: "nodo-x"
-//      }
-//    }
-//
-//  Esta función detecta ese formato y lo convierte al esquema de grados
-//  que usa nuestra tabla de Supabase.
-// ─────────────────────────────────────────────────────────────────────────────
-function esFormatoCompaneroExpress(bloque) {
-  // Tiene hashActual (camelCase) y data.transacciones → formato del compañero
-  return !!(bloque.hashActual && bloque.data && Array.isArray(bloque.data.transacciones));
-}
 
-function adaptarBloqueCompanero(bloque) {
-  // Tomamos la primera transacción del bloque para mapear los campos de grado
-  const tx = bloque.data?.transacciones?.[0] || {};
+// ─────────────────────────────────────────────────────────────────────────────
+//  Normalizador universal de bloque
+//
+//  Acepta cualquier combinación de snake_case y camelCase que puedan
+//  mandar los distintos nodos (Express propio, Express compañero, Laravel).
+//  Siempre devuelve un objeto con los campos en snake_case que espera Supabase.
+// ─────────────────────────────────────────────────────────────────────────────
+function normalizarBloque(raw) {
+  // Detectar si es el formato del compañero Express (bloque con data.transacciones)
+  const esFormatoExpressCompanero = !!(
+    raw.hashActual && raw.data && Array.isArray(raw.data.transacciones)
+  );
 
-  // El compañero usa camelCase en sus transacciones
-  const persona_id      = tx.persona_id      || tx.personaId      || null;
-  const institucion_id  = tx.institucion_id  || tx.institucionId  || null;
-  const programa_id     = tx.programa_id     || tx.programaId     || null;
-  const titulo_obtenido = tx.titulo_obtenido || tx.tituloObtenido || null;
-  const fecha_fin       = tx.fecha_fin       || tx.fechaFin       || null;
-  const numero_cedula   = tx.numero_cedula   || tx.numeroCedula   || null;
-  const fecha_inicio    = tx.fecha_inicio    || tx.fechaInicio    || null;
-  const titulo_tesis    = tx.titulo_tesis    || tx.tituloTesis    || null;
-  const menciones       = tx.menciones       || null;
+  let tx = {};
+  if (esFormatoExpressCompanero) {
+    tx = raw.data?.transacciones?.[0] || {};
+  } else {
+    // El bloque mismo contiene los campos del grado (Laravel, nuestro nodo, etc.)
+    tx = raw;
+  }
 
   return {
-    persona_id,
-    institucion_id,
-    programa_id,
-    fecha_inicio,
-    fecha_fin,
-    titulo_obtenido,
-    numero_cedula,
-    titulo_tesis,
-    menciones,
-    // Campos blockchain — traducir camelCase → snake_case
-    hash_actual:   bloque.hashActual,
-    hash_anterior: bloque.hashAnterior || bloque.hash_anterior || null,
-    nonce:         bloque.nonce,
-    firmado_por:   bloque.data?.minadoPor || 'nodo-companero',
+    // Campos del grado — soportar snake_case y camelCase
+    persona_id:      tx.persona_id      || tx.personaId      || null,
+    institucion_id:  tx.institucion_id  || tx.institucionId  || null,
+    programa_id:     tx.programa_id     || tx.programaId     || null,
+    fecha_inicio:    tx.fecha_inicio    || tx.fechaInicio    || null,
+    fecha_fin:       tx.fecha_fin       || tx.fechaFin       || null,
+    titulo_obtenido: tx.titulo_obtenido || tx.tituloObtenido || null,
+    numero_cedula:   tx.numero_cedula   || tx.numeroCedula   || null,
+    titulo_tesis:    tx.titulo_tesis    || tx.tituloTesis    || null,
+    menciones:       tx.menciones       || null,
+    // Campos blockchain — soportar snake_case y camelCase
+    hash_actual:     raw.hash_actual    || raw.hashActual    || null,
+    hash_anterior:   raw.hash_anterior  || raw.hashAnterior  || raw.previousHash || null,
+    nonce:           raw.nonce          || null,
+    firmado_por:     raw.firmado_por    || raw.data?.minadoPor || raw.minadoPor || 'nodo-desconocido',
   };
 }
 
-// ─── POST /mine ───────────────────────────────
+// ─── POST /mine ───────────────────────────────────────────────────────────────
 async function handleMine(req, res) {
   try {
     const pendientes = bc.obtenerTransacciones();
-
     if (pendientes.length === 0) {
       return res.status(400).json({ error: 'No hay transacciones pendientes para minar.' });
     }
@@ -112,7 +91,7 @@ async function handleMine(req, res) {
     });
 
     const tiempoMs = Date.now() - inicio;
-    console.log(`[MINADO] PoW encontrado en ${tiempoMs}ms. Nonce: ${nonce}, Hash: ${hash}`);
+    console.log(`[MINADO] PoW en ${tiempoMs}ms. Nonce: ${nonce}, Hash: ${hash}`);
 
     const nuevoBloque = {
       persona_id:      tx.persona_id,
@@ -137,11 +116,7 @@ async function handleMine(req, res) {
 
     propagarBloque(bloqueGuardado);
 
-    res.status(201).json({
-      message: 'Bloque minado exitosamente',
-      block:   bloqueGuardado,
-      pow_ms:  tiempoMs,
-    });
+    res.status(201).json({ message: 'Bloque minado exitosamente', block: bloqueGuardado, pow_ms: tiempoMs });
   } catch (e) {
     console.error('[MINE]', e);
     res.status(500).json({ error: e.message });
@@ -150,40 +125,36 @@ async function handleMine(req, res) {
 
 router.post('/mine', handleMine);
 
-// ─── POST /blocks/receive  (y alias /block, /blocks, etc.) ───────────────────
+// ─── POST receive ─────────────────────────────────────────────────────────────
 async function handleReceive(req, res) {
-  let bloque = req.body;
+  const raw = req.body;
 
-  if (!bloque) {
+  if (!raw) {
     return res.status(400).json({ error: 'Body vacío.' });
   }
 
-  // ── Detectar y adaptar formato del compañero Express ──────────────────────
-  if (esFormatoCompaneroExpress(bloque)) {
-    console.log(`[RECEIVE] Formato del compañero Express detectado — adaptando...`);
-    bloque = adaptarBloqueCompanero(bloque);
-  }
+  // Normalizar a snake_case limpio para Supabase
+  const bloque = normalizarBloque(raw);
 
-  // Ahora esperamos el formato estándar
   if (!bloque.hash_actual) {
     return res.status(400).json({ error: 'Bloque inválido: falta hash_actual.' });
   }
 
+  console.log(`[RECEIVE] Bloque recibido. hash_actual: ${bloque.hash_actual.substring(0, 16)}... firmado_por: ${bloque.firmado_por}`);
+
   try {
-    // ── Verificar duplicado ────────────────────────────────────────────────
+    // Verificar duplicado
     const existe = await bc.bloqueExiste(bloque.hash_actual);
     if (existe) {
       return res.status(200).json({ message: 'Bloque ya conocido, ignorando.' });
     }
 
-    // ── Verificar PoW (mínimo) ─────────────────────────────────────────────
+    // Verificar PoW
     if (!bc.cumplePoW(bloque.hash_actual)) {
       return res.status(400).json({ error: 'El bloque no cumple el Proof of Work.' });
     }
 
-    // ── Validar hash solo si tenemos todos los campos necesarios ───────────
-    //    Si el compañero usa una fórmula de hash diferente, la recalculación
-    //    fallará, pero al menos el PoW ya pasó — guardamos el bloque.
+    // Validar hash (solo advertencia si no coincide — puede usar fórmula diferente)
     if (bloque.persona_id && bloque.institucion_id && bloque.titulo_obtenido && bloque.fecha_fin) {
       const hashEsperado = bc.calcularHash({
         persona_id:      bloque.persona_id,
@@ -195,17 +166,43 @@ async function handleReceive(req, res) {
         hash_anterior:   bloque.hash_anterior,
         nonce:           bloque.nonce,
       });
-
       if (hashEsperado !== bloque.hash_actual) {
-        // El hash no coincide con nuestra fórmula → podría ser la del compañero
-        // Lo advertimos pero NO rechazamos: el PoW ya validó integridad básica
-        console.warn(`[RECEIVE] Hash no coincide con nuestra fórmula (posible fórmula diferente). Aceptando de todas formas (PoW válido).`);
+        console.warn(`[RECEIVE] Hash distinto a nuestra fórmula — aceptando por PoW válido.`);
       }
     }
 
-    // ── Guardar en Supabase ────────────────────────────────────────────────
-    const { id, creado_en, ...datos } = bloque;
-    const guardado = await bc.insertarBloque(datos);
+    // Guardar en Supabase (solo campos que existen en la tabla)
+    const guardado = await bc.insertarBloque({
+      persona_id:      bloque.persona_id,
+      institucion_id:  bloque.institucion_id,
+      programa_id:     bloque.programa_id,
+      fecha_inicio:    bloque.fecha_inicio,
+      fecha_fin:       bloque.fecha_fin,
+      titulo_obtenido: bloque.titulo_obtenido,
+      numero_cedula:   bloque.numero_cedula,
+      titulo_tesis:    bloque.titulo_tesis,
+      menciones:       bloque.menciones,
+      hash_actual:     bloque.hash_actual,
+      hash_anterior:   bloque.hash_anterior,
+      nonce:           bloque.nonce,
+      firmado_por:     bloque.firmado_por,
+    });
+
+    // Limpiar transacciones pendientes ya minadas por el compañero
+    if (bloque.persona_id && bloque.titulo_obtenido) {
+      const pendientes = bc.obtenerTransacciones();
+      const restantes = pendientes.filter(tx =>
+        !(tx.persona_id      === bloque.persona_id      &&
+          tx.institucion_id  === bloque.institucion_id  &&
+          tx.titulo_obtenido === bloque.titulo_obtenido &&
+          tx.fecha_fin       === bloque.fecha_fin)
+      );
+      if (restantes.length < pendientes.length) {
+        bc.limpiarTransacciones();
+        restantes.forEach(t => bc.agregarTransaccion(t));
+        console.log(`[RECEIVE] TX ya minada eliminada de pendientes. Quedan: ${restantes.length}`);
+      }
+    }
 
     console.log(`[RECEIVE] ✓ Bloque guardado de ${bloque.firmado_por}: ${bloque.hash_actual.substring(0, 16)}...`);
     res.status(201).json({ message: 'Bloque aceptado e integrado.', block: guardado });
@@ -219,6 +216,6 @@ async function handleReceive(req, res) {
 router.post('/blocks/receive', handleReceive);
 router.post('/receive',        handleReceive);
 
-module.exports        = router;
+module.exports               = router;
 module.exports.handleMine    = handleMine;
 module.exports.handleReceive = handleReceive;
